@@ -1,0 +1,4 @@
+model,deviance_all_cells,deviance_observed_only,deviance_top_decile,n_observed_cells,n_top_decile_cells
+negbin_glm,0.8619,1.0626,1.8112,833,411
+lgbm_poisson,0.883,1.1119,1.8292,833,413
+convlstm,0.411,1.4465,1.4666,817,1178

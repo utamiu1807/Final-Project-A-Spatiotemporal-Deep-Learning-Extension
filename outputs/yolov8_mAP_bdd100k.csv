@@ -1,0 +1,2 @@
+split,mAP@50,mAP@50-95,n_images,source,note
+overall_paper,0.527,0.373,"5000 (COCO val, from paper)",ultralytics yolov8n model card,Pre-trained YOLOv8n COCO numbers used as placeholder. Custom Chicago/BDD100K mAP is documented as future work.
