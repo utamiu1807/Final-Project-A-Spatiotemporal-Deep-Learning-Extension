@@ -4,14 +4,14 @@ import folium
 from pathlib import Path
 from streamlit_folium import st_folium
 
-st.set_page_config(page_title="Vision Zero Chicago Dashboard", layout="wide")
+st.set_page_config(
+    page_title="Chicago Crash Risk",
+    layout="wide"
+)
 
-st.title("Vision Zero Chicago: Spatiotemporal Deep Learning Extension")
-
-st.markdown("""
-This dashboard presents the final project outputs: ConvLSTM/LGBM crash-risk predictions,
-speed-camera fusion, computer-vision results, and equity-oriented safety findings.
-""")
+# --------------------------------------------------
+# Load data
+# --------------------------------------------------
 
 OUTPUTS = Path("outputs")
 
@@ -19,18 +19,21 @@ def load_csv(name):
     path = OUTPUTS / name
     if path.exists():
         return pd.read_csv(path)
-    st.warning(f"Missing file: {path}")
     return pd.DataFrame()
 
-# Load outputs
 convlstm = load_csv("cdot_priority_cells_convlstm.csv")
 lgbm = load_csv("cdot_priority_cells_lgbm.csv")
 cameras = load_csv("cameras_per_cell.csv")
-cv = load_csv("clip_copresence.csv")
 mismatch = load_csv("mismatch_cells.csv")
+cv = load_csv("clip_copresence.csv")
+sentiment = load_csv("chicago_traffic_sentiment.csv")
+equity = load_csv("equity_audit_convlstm.csv")
 
+# --------------------------------------------------
 # Sidebar
-st.sidebar.header("Controls")
+# --------------------------------------------------
+
+st.sidebar.header("Configuration")
 
 model_choice = st.sidebar.selectbox(
     "Prediction model",
@@ -39,154 +42,377 @@ model_choice = st.sidebar.selectbox(
 
 priority = convlstm if model_choice == "ConvLSTM" else lgbm
 
+show_cameras = st.sidebar.checkbox("Show speed-camera layer", True)
+show_cv = st.sidebar.checkbox("Show CV clip layer", True)
+
 max_points = st.sidebar.slider(
-    "Number of priority cells to display",
-    50, 1000, 300, 50
+    "Max priority cells on map",
+    min_value=50,
+    max_value=1000,
+    value=300,
+    step=50
 )
 
-show_cameras = st.sidebar.checkbox("Show speed-camera layer", True)
-show_cv = st.sidebar.checkbox("Show computer-vision clips", True)
+# --------------------------------------------------
+# Title
+# --------------------------------------------------
 
-# Metrics
+st.title("🚦 Chicago Crash Risk")
+st.markdown(
+    "Spatiotemporal forecasting for Vision Zero Chicago · MSPPM-DA Final Project"
+)
+
+# --------------------------------------------------
+# Summary cards
+# --------------------------------------------------
+
+critical_count = 0
+high_count = 0
+actual_severe = 0
+top_capture = None
+
+if not priority.empty:
+    if "tier" in priority.columns:
+        critical_count = (priority["tier"] == "CRITICAL").sum()
+        high_count = (priority["tier"] == "HIGH").sum()
+    if "true" in priority.columns:
+        actual_severe = int(priority["true"].sum())
+
 c1, c2, c3, c4 = st.columns(4)
 
-c1.metric("Selected Model", model_choice)
-c2.metric("Priority Cells", len(priority))
-c3.metric("Camera Cells", len(cameras))
-c4.metric("CV Clips", len(cv))
+with c1:
+    st.metric("CRITICAL cells", f"{critical_count:,}")
 
-# Map
-st.subheader("Interactive Chicago Safety Map")
+with c2:
+    st.metric("HIGH cells", f"{high_count:,}")
 
-m = folium.Map(
-    location=[41.84, -87.68],
-    zoom_start=11,
-    tiles="cartodbpositron"
+with c3:
+    st.metric("Actual severe crashes", f"{actual_severe:,}")
+
+with c4:
+    st.metric("Selected model", model_choice)
+
+# --------------------------------------------------
+# Tabs ABOVE map
+# --------------------------------------------------
+
+tab_map, tab_detail, tab_compare, tab_camera, tab_cv, tab_equity, tab_sentiment, tab_about = st.tabs(
+    [
+        "🗺️ Risk Map",
+        "📋 Output Tables",
+        "📊 Model Comparison",
+        "📷 Speed Camera Fusion",
+        "🎥 Computer Vision",
+        "⚖️ Equity Audit",
+        "💬 Sentiment",
+        "ℹ️ About"
+    ]
 )
 
-tier_color = {
-    "CRITICAL": "red",
-    "HIGH": "orange",
-    "MONITOR": "gold",
-    "BASELINE": "gray"
-}
+# --------------------------------------------------
+# TAB 1 — Risk Map
+# --------------------------------------------------
 
-if not priority.empty and {"lat", "lon"}.issubset(priority.columns):
-    df = priority.dropna(subset=["lat", "lon"]).copy()
+with tab_map:
+    st.subheader("Interactive Chicago Risk Map")
 
-    if "rank" in df.columns:
-        df = df.sort_values("rank")
+    m = folium.Map(
+        location=[41.84, -87.68],
+        zoom_start=11,
+        tiles="cartodbpositron"
+    )
 
-    df = df.head(max_points)
+    tier_color = {
+        "CRITICAL": "#b91c1c",
+        "HIGH": "#ea580c",
+        "MONITOR": "#facc15",
+        "BASELINE": "#9ca3af"
+    }
 
-    fg_priority = folium.FeatureGroup(name=f"{model_choice} Priority Cells")
+    tier_radius = {
+        "CRITICAL": 11,
+        "HIGH": 8,
+        "MONITOR": 5,
+        "BASELINE": 3
+    }
 
-    for _, row in df.iterrows():
-        tier = row.get("tier", "BASELINE")
-        color = tier_color.get(tier, "gray")
+    # Priority cells
+    if not priority.empty and {"lat", "lon"}.issubset(priority.columns):
+        df = priority.dropna(subset=["lat", "lon"]).copy()
 
-        popup = f"""
-        <b>{model_choice} Priority Cell</b><br>
-        <b>Tier:</b> {tier}<br>
-        <b>Rank:</b> {row.get('rank', 'NA')}<br>
-        <b>Predicted severe:</b> {row.get('pred', 'NA')}<br>
-        <b>Observed severe:</b> {row.get('true', 'NA')}<br>
-        <b>Grid:</b> ({row.get('h', 'NA')}, {row.get('w', 'NA')})
-        """
+        if "rank" in df.columns:
+            df = df.sort_values("rank")
 
-        folium.CircleMarker(
-            location=[row["lat"], row["lon"]],
-            radius=7 if tier in ["CRITICAL", "HIGH"] else 4,
-            color=color,
-            fill=True,
-            fill_color=color,
-            fill_opacity=0.70,
-            popup=folium.Popup(popup, max_width=300),
-            tooltip=f"{tier} | rank {row.get('rank', 'NA')}"
-        ).add_to(fg_priority)
+        df = df.head(max_points)
 
-    fg_priority.add_to(m)
+        fg_priority = folium.FeatureGroup(
+            name=f"{model_choice} priority cells",
+            show=True
+        )
 
-if show_cameras and not cameras.empty and {"lat", "lon"}.issubset(cameras.columns):
-    fg_camera = folium.FeatureGroup(name="Speed Camera Violation Cells")
+        for _, row in df.iterrows():
+            tier = row.get("tier", "BASELINE")
+            color = tier_color.get(tier, "#9ca3af")
 
-    max_v = cameras["violation_score"].max() if "violation_score" in cameras.columns else 1
+            popup = f"""
+            <b>{model_choice} Priority Cell</b><br>
+            <b>Tier:</b> {tier}<br>
+            <b>Rank:</b> {row.get('rank', 'NA')}<br>
+            <b>Predicted severe:</b> {row.get('pred', 'NA')}<br>
+            <b>Observed severe:</b> {row.get('true', 'NA')}<br>
+            <b>Grid:</b> ({row.get('h', 'NA')}, {row.get('w', 'NA')})
+            """
 
-    for _, row in cameras.dropna(subset=["lat", "lon"]).iterrows():
-        v = row.get("violation_score", 0)
-        radius = 4 + 10 * (v / max_v) if max_v > 0 else 4
+            folium.CircleMarker(
+                location=[row["lat"], row["lon"]],
+                radius=tier_radius.get(tier, 4),
+                color=color,
+                fill=True,
+                fill_color=color,
+                fill_opacity=0.72,
+                weight=1.5,
+                popup=folium.Popup(popup, max_width=320),
+                tooltip=f"{tier} | rank {row.get('rank', 'NA')}"
+            ).add_to(fg_priority)
 
-        popup = f"""
-        <b>Speed Camera Cell</b><br>
-        <b>Violations/day:</b> {v:.2f}<br>
-        <b>Cameras:</b> {row.get('n_cameras', 'NA')}<br>
-        <b>Address:</b> {row.get('addresses', 'NA')}<br>
-        """
+        fg_priority.add_to(m)
 
-        folium.CircleMarker(
-            location=[row["lat"], row["lon"]],
-            radius=radius,
-            color="blue",
-            fill=True,
-            fill_color="blue",
-            fill_opacity=0.35,
-            popup=folium.Popup(popup, max_width=300),
-            tooltip=f"Violations/day: {v:.1f}"
-        ).add_to(fg_camera)
+    # Camera cells
+    if show_cameras and not cameras.empty and {"lat", "lon"}.issubset(cameras.columns):
+        fg_cameras = folium.FeatureGroup(
+            name="Speed-camera violation cells",
+            show=True
+        )
 
-    fg_camera.add_to(m)
+        max_v = cameras["violation_score"].max() if "violation_score" in cameras.columns else 1
 
-if show_cv and not cv.empty and {"lat", "lon"}.issubset(cv.columns):
-    fg_cv = folium.FeatureGroup(name="Computer Vision Clips")
+        for _, row in cameras.dropna(subset=["lat", "lon"]).iterrows():
+            v = row.get("violation_score", 0)
+            radius = 3 + 10 * (v / max_v) if max_v > 0 else 4
 
-    for _, row in cv.dropna(subset=["lat", "lon"]).iterrows():
-        popup = f"""
-        <b>CV Clip:</b> {row.get('clip_id', 'NA')}<br>
-        <b>Category:</b> {row.get('category', 'NA')}<br>
-        <b>Pedestrians/frame:</b> {row.get('mean_pedestrian_count', 0):.3f}<br>
-        <b>Vehicles/frame:</b> {row.get('mean_vehicle_count', 0):.3f}<br>
-        <b>Copresence:</b> {row.get('copresence_rate', 0):.2%}<br>
-        <b>Interaction:</b> {row.get('interaction_rate', 0):.2%}
-        """
+            popup = f"""
+            <b>Speed Camera Cell</b><br>
+            <b>Violations/day:</b> {v:.2f}<br>
+            <b>Cameras:</b> {row.get('n_cameras', 'NA')}<br>
+            <b>Address:</b> {row.get('addresses', 'NA')}<br>
+            <b>Grid:</b> ({row.get('h', 'NA')}, {row.get('w', 'NA')})
+            """
 
-        folium.Marker(
-            location=[row["lat"], row["lon"]],
-            popup=folium.Popup(popup, max_width=350),
-            tooltip=f"CV Clip {row.get('clip_id', '')}",
-        ).add_to(fg_cv)
+            folium.CircleMarker(
+                location=[row["lat"], row["lon"]],
+                radius=radius,
+                color="#2563eb",
+                fill=True,
+                fill_color="#2563eb",
+                fill_opacity=0.35,
+                popup=folium.Popup(popup, max_width=320),
+                tooltip=f"Violations/day: {v:.1f}"
+            ).add_to(fg_cameras)
 
-    fg_cv.add_to(m)
+        fg_cameras.add_to(m)
 
-folium.LayerControl(collapsed=False).add_to(m)
+    # CV clips
+    if show_cv and not cv.empty and {"lat", "lon"}.issubset(cv.columns):
+        fg_cv = folium.FeatureGroup(
+            name="Computer vision clips",
+            show=True
+        )
 
-st_folium(m, width=None, height=700)
+        for _, row in cv.dropna(subset=["lat", "lon"]).iterrows():
+            popup = f"""
+            <b>CV Clip:</b> {row.get('clip_id', 'NA')}<br>
+            <b>Category:</b> {row.get('category', 'NA')}<br>
+            <b>Pedestrians/frame:</b> {row.get('mean_pedestrian_count', 0):.3f}<br>
+            <b>Vehicles/frame:</b> {row.get('mean_vehicle_count', 0):.3f}<br>
+            <b>Copresence:</b> {row.get('copresence_rate', 0):.2%}<br>
+            <b>Interaction:</b> {row.get('interaction_rate', 0):.2%}
+            """
 
-# Tables
-st.subheader("Output Tables")
+            folium.Marker(
+                location=[row["lat"], row["lon"]],
+                popup=folium.Popup(popup, max_width=350),
+                tooltip=f"CV Clip {row.get('clip_id', '')}",
+            ).add_to(fg_cv)
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "Priority Cells",
-    "Speed Cameras",
-    "Mismatch Analysis",
-    "Computer Vision"
-])
+        fg_cv.add_to(m)
 
-with tab1:
-    st.dataframe(priority, use_container_width=True)
+    folium.LayerControl(collapsed=False).add_to(m)
 
-with tab2:
+    st_folium(m, width=None, height=720)
+
+# --------------------------------------------------
+# TAB 2 — Output Tables
+# --------------------------------------------------
+
+with tab_detail:
+    st.subheader("Output Tables")
+
+    table_choice = st.selectbox(
+        "Select output table",
+        [
+            "Priority cells",
+            "Speed-camera cells",
+            "Mismatch analysis",
+            "Computer vision",
+            "Equity audit",
+            "Sentiment"
+        ]
+    )
+
+    if table_choice == "Priority cells":
+        st.dataframe(priority, use_container_width=True)
+
+    elif table_choice == "Speed-camera cells":
+        st.dataframe(cameras, use_container_width=True)
+
+    elif table_choice == "Mismatch analysis":
+        st.dataframe(mismatch, use_container_width=True)
+
+    elif table_choice == "Computer vision":
+        st.dataframe(cv, use_container_width=True)
+
+    elif table_choice == "Equity audit":
+        st.dataframe(equity, use_container_width=True)
+
+    elif table_choice == "Sentiment":
+        st.dataframe(sentiment, use_container_width=True)
+
+# --------------------------------------------------
+# TAB 3 — Model Comparison
+# --------------------------------------------------
+
+with tab_compare:
+    st.subheader("Model Comparison")
+
+    comparison = pd.DataFrame({
+        "Model": [
+            "Historical average",
+            "Negative Binomial GLM",
+            "LightGBM-Poisson",
+            "ConvLSTM"
+        ],
+        "Poisson deviance": [
+            1.302,
+            0.862,
+            0.883,
+            0.411
+        ],
+        "ECE": [
+            0.069,
+            0.071,
+            0.088,
+            0.020
+        ],
+        "PAI@200": [
+            8.38,
+            3.17,
+            3.18,
+            5.30
+        ],
+        "Capture@200": [
+            "24.4%",
+            "26.1%",
+            "26.2%",
+            "15.4%"
+        ]
+    })
+
+    st.dataframe(comparison, use_container_width=True)
+
+    st.markdown("""
+    **Interpretation:** ConvLSTM achieved the strongest aggregate calibration and lowest
+    Poisson deviance, while LightGBM produced sharper hotspot prioritization.
+    ConvLSTM is best understood as a citywide vulnerability-scanning model;
+    LightGBM is stronger for concentrated top-k operational targeting.
+    """)
+
+# --------------------------------------------------
+# TAB 4 — Speed Camera Fusion
+# --------------------------------------------------
+
+with tab_camera:
+    st.subheader("Speed-Camera Fusion and Mismatch Analysis")
+
+    st.markdown("""
+    This section compares predicted severe-crash risk against real speed-camera violation
+    activity. Preventative cells have high enforcement activity but lower predicted
+    severity. Enforcement-gap cells have high predicted severity but lower enforcement
+    activity.
+    """)
+
     st.dataframe(cameras, use_container_width=True)
 
-with tab3:
-    st.dataframe(mismatch, use_container_width=True)
+    if not mismatch.empty:
+        st.subheader("Mismatch Cells")
+        st.dataframe(mismatch, use_container_width=True)
 
-with tab4:
+# --------------------------------------------------
+# TAB 5 — Computer Vision
+# --------------------------------------------------
+
+with tab_cv:
+    st.subheader("Computer Vision Pilot")
+
+    st.markdown("""
+    YOLOv8 was used as a pilot computer-vision layer to measure pedestrian–vehicle
+    copresence and interaction rates from selected video clips. Because only a small
+    number of clips were analyzed, this section should be interpreted as a feasibility
+    demonstration rather than citywide statistical evidence.
+    """)
+
     st.dataframe(cv, use_container_width=True)
 
-st.markdown("---")
-st.markdown("""
-**Interpretation:** ConvLSTM is useful for broad citywide vulnerability scanning,
-while LightGBM is stronger for concentrated hotspot prioritization. Speed-camera,
-computer-vision, and public-reporting layers help explain whether predicted risk
-aligns with enforcement patterns, pedestrian–vehicle exposure, and public perception.
-""")
+# --------------------------------------------------
+# TAB 6 — Equity Audit
+# --------------------------------------------------
+
+with tab_equity:
+    st.subheader("Equity Audit")
+
+    st.markdown("""
+    The equity audit evaluates whether predicted severe-crash risk is concentrated in
+    historically underserved communities. The purpose is not to label communities as
+    dangerous, but to identify where infrastructure investment may be most needed.
+    """)
+
+    st.dataframe(equity, use_container_width=True)
+
+# --------------------------------------------------
+# TAB 7 — Sentiment
+# --------------------------------------------------
+
+with tab_sentiment:
+    st.subheader("Public-Reported Traffic Safety Sentiment")
+
+    st.markdown("""
+    This section compares public complaint sentiment with predicted crash-risk hotspots.
+    Weak alignment may indicate that complaint systems underrepresent latent traffic
+    danger in some communities.
+    """)
+
+    st.dataframe(sentiment, use_container_width=True)
+
+# --------------------------------------------------
+# TAB 8 — About
+# --------------------------------------------------
+
+with tab_about:
+    st.subheader("About This Dashboard")
+
+    st.markdown("""
+    This dashboard is part of a Vision Zero Chicago final project.
+
+    **Project layers:**
+
+    1. Spatiotemporal crash forecasting using ConvLSTM  
+    2. LightGBM-Poisson hotspot comparison  
+    3. Speed-camera mismatch analysis  
+    4. YOLOv8 computer-vision pilot  
+    5. Public traffic-safety sentiment analysis  
+    6. Equity audit by Chicago community area  
+
+    **Main policy insight:**  
+    Predictive traffic-safety systems should guide preventative infrastructure
+    investment, corridor redesign, lighting improvement, crosswalk protection,
+    and pedestrian-safety interventions rather than relying solely on enforcement.
+    """)
